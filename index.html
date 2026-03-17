@@ -230,10 +230,10 @@ body {
     </div>
     <div class="speed-control">
       <span>遅い</span>
-      <input type="range" id="speedSlider" min="0.5" max="2.0" step="0.1" value="1.0"
+      <input type="range" id="speedSlider" min="0.5" max="4.0" step="0.1" value="2.0"
              oninput="updateSpeed(this.value)">
       <span>速い</span>
-      <span id="speedLabel">1.0x</span>
+      <span id="speedLabel">2.0x</span>
     </div>
   </div>
 </div>
@@ -957,27 +957,35 @@ function showToast(msg) {
 }
 
 // ============================================================
-// TTS 読み上げ - 超安定版
-// speechSynthesis のキューを使わず、1チャンクずつ完全に完了してから次を発射
-// pause/resume は使わない（Chromeで壊れているため）
-// 代わりにチャンク間で停止/再開する方式
+// TTS 読み上げ - Google Translate TTS + <audio> 方式
+// Web Speech API を完全に廃止。<audio> 再生なので安定。
 // ============================================================
 let ttsChunks = [];
 let ttsIndex = 0;
 let ttsState = 'stopped'; // stopped | playing | paused
-let ttsSpeed = 1.0;
-let ttsTimer = null;
-let ttsRetryCount = 0;
-const TTS_MAX_RETRY = 3;
+let ttsSpeed = 2.0;
+let ttsAudio = new Audio();
 
-function splitForTTS(text) {
-  // 1文ずつ分割（最も安定する粒度）
-  const raw = text.split(/(?<=[。！？\!\?\n])/);
+// Google Translate TTS URL生成（1リクエスト最大200文字程度）
+function gttsUrl(text, lang = 'ja') {
+  return `https://translate.google.com/translate_tts?ie=UTF-8&tl=${lang}&client=tw-ob&q=${encodeURIComponent(text)}`;
+}
+
+function splitForTTS(text, maxLen = 180) {
+  // Google Translate TTSは約200文字が上限
+  const sentences = text.split(/(?<=[。！？\.\!\?\n])/);
   const chunks = [];
-  for (const s of raw) {
+  let buf = '';
+  for (const s of sentences) {
     const t = s.trim();
-    if (t.length > 0) chunks.push(t);
+    if (!t) continue;
+    if ((buf + t).length > maxLen && buf.length > 0) {
+      chunks.push(buf.trim());
+      buf = '';
+    }
+    buf += t;
   }
+  if (buf.trim()) chunks.push(buf.trim());
   return chunks;
 }
 
@@ -985,24 +993,20 @@ function ttsPlay() {
   const body = document.getElementById('detailBody').textContent;
   if (!body) return;
 
-  speechSynthesis.cancel();
+  ttsAudio.pause();
   ttsChunks = splitForTTS(body);
   ttsIndex = (savedTtsChunk > 0 && savedTtsChunk < ttsChunks.length)
     ? savedTtsChunk : 0;
-  ttsRetryCount = 0;
   ttsState = 'playing';
   updateTtsUI();
   document.getElementById('playBtn').textContent = '▶ 読み上げ';
-  scheduleNextChunk();
+  playCurrentChunk();
 }
 
-function scheduleNextChunk() {
-  clearTtsTimer();
-
+function playCurrentChunk() {
   if (ttsState !== 'playing') return;
 
   if (ttsIndex >= ttsChunks.length) {
-    // 完了
     ttsState = 'stopped';
     ttsIndex = 0;
     savedTtsChunk = 0;
@@ -1012,104 +1016,63 @@ function scheduleNextChunk() {
     return;
   }
 
-  // 前の発話が残っていたらキャンセル
-  speechSynthesis.cancel();
-
-  // 少し待ってから発話（cancel直後にspeakすると無視されることがある）
-  ttsTimer = setTimeout(() => {
-    if (ttsState !== 'playing') return;
-    speakOneChunk();
-  }, 100);
-}
-
-function speakOneChunk() {
   const text = ttsChunks[ttsIndex];
-  const utter = new SpeechSynthesisUtterance(text);
-  utter.lang = 'ja-JP';
-  utter.rate = ttsSpeed;
+  ttsAudio.src = gttsUrl(text);
+  ttsAudio.playbackRate = ttsSpeed;
 
-  const voices = speechSynthesis.getVoices();
-  const jaVoice = voices.find(v => v.lang.startsWith('ja'));
-  if (jaVoice) utter.voice = jaVoice;
-
-  let resolved = false;
-
-  const advance = () => {
-    if (resolved) return;
-    resolved = true;
-    clearTtsTimer();
-    ttsRetryCount = 0;
-    ttsIndex++;
-    savedTtsChunk = ttsIndex;
-    if (currentArticleId) dbSavePosition(currentArticleId, ttsIndex);
-    scheduleNextChunk();
+  ttsAudio.oncanplaythrough = () => {
+    ttsAudio.playbackRate = ttsSpeed;
   };
 
-  const retry = () => {
-    if (resolved) return;
-    resolved = true;
-    clearTtsTimer();
-    ttsRetryCount++;
-    if (ttsRetryCount >= TTS_MAX_RETRY) {
-      // リトライ上限 → スキップして次へ
-      console.warn('TTS: skipping chunk', ttsIndex, 'after', TTS_MAX_RETRY, 'retries');
-      ttsRetryCount = 0;
+  ttsAudio.onended = () => {
+    if (ttsState === 'playing') {
       ttsIndex++;
       savedTtsChunk = ttsIndex;
       if (currentArticleId) dbSavePosition(currentArticleId, ttsIndex);
+      playCurrentChunk();
     }
-    scheduleNextChunk();
   };
 
-  utter.onend = () => advance();
-  utter.onerror = (e) => {
-    if (e.error === 'canceled' && ttsState !== 'playing') return;
-    console.warn('TTS error:', e.error, 'chunk:', ttsIndex);
-    retry();
+  ttsAudio.onerror = () => {
+    console.warn('TTS audio error, skipping chunk', ttsIndex);
+    if (ttsState === 'playing') {
+      ttsIndex++;
+      savedTtsChunk = ttsIndex;
+      if (currentArticleId) dbSavePosition(currentArticleId, ttsIndex);
+      playCurrentChunk();
+    }
   };
 
-  speechSynthesis.speak(utter);
-
-  // 安全タイマー: 推定時間の2倍経っても終わらなければリトライ
-  const estimatedMs = Math.max((text.length / 4) * 1000 / ttsSpeed, 3000) * 2;
-  ttsTimer = setTimeout(() => {
-    if (!resolved && ttsState === 'playing') {
-      console.warn('TTS timeout: chunk', ttsIndex, '- forcing retry');
-      speechSynthesis.cancel();
-      retry();
-    }
-  }, estimatedMs);
-}
-
-function clearTtsTimer() {
-  if (ttsTimer) { clearTimeout(ttsTimer); ttsTimer = null; }
+  ttsAudio.play().catch(() => {
+    // autoplay blocked - ユーザー操作が必要
+    showToast('再生するにはもう一度タップしてください');
+    ttsState = 'stopped';
+    updateTtsUI();
+  });
 }
 
 function ttsPause() {
-  // pause/resume は使わない。状態だけ変えて、現在のチャンク完了後に止まる
+  ttsAudio.pause();
   ttsState = 'paused';
-  speechSynthesis.cancel(); // 現在の発話を即停止
-  clearTtsTimer();
   updateTtsUI();
 }
 
 function ttsResume() {
   ttsState = 'playing';
-  ttsRetryCount = 0;
+  ttsAudio.playbackRate = ttsSpeed;
+  ttsAudio.play();
   updateTtsUI();
-  scheduleNextChunk(); // 現在のチャンクから再開
 }
 
 function ttsStop() {
-  clearTtsTimer();
-  speechSynthesis.cancel();
+  ttsAudio.pause();
+  ttsAudio.src = '';
   if (currentArticleId && ttsIndex > 0) {
     savedTtsChunk = ttsIndex;
     dbSavePosition(currentArticleId, ttsIndex);
   }
   ttsState = 'stopped';
   ttsIndex = 0;
-  ttsRetryCount = 0;
   updateTtsUI();
 }
 
@@ -1128,9 +1091,10 @@ function updateTtsUI() {
 function updateSpeed(val) {
   ttsSpeed = parseFloat(val);
   document.getElementById('speedLabel').textContent = ttsSpeed.toFixed(1) + 'x';
+  if (ttsState === 'playing' || ttsState === 'paused') {
+    ttsAudio.playbackRate = ttsSpeed;
+  }
 }
-
-speechSynthesis.onvoiceschanged = () => {};
 
 // Enterキーで保存
 document.getElementById('urlInput').addEventListener('keydown', e => {
