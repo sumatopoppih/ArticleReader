@@ -10,6 +10,7 @@
 <meta name="theme-color" content="#1a73e8">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📖</text></svg>">
 <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📖</text></svg>">
+<script src="https://js.puter.com/v2/"></script>
 <style>
 :root {
   --bg: #f5f5f5; --surface: #ffffff; --primary: #1a73e8;
@@ -957,18 +958,14 @@ function showToast(msg) {
 }
 
 // ============================================================
-// TTS 読み上げ - Google Translate TTS + <audio> 方式
-// Web Speech API を完全に廃止。<audio> 再生なので安定。
+// TTS 読み上げ - Puter.js TTS (Amazon Polly ベース、無料・無制限)
 // ============================================================
 let ttsChunks = [];
 let ttsIndex = 0;
 let ttsState = 'stopped'; // stopped | playing | paused
 let ttsSpeed = 2.0;
-let ttsAudio = new Audio();
+let ttsAudio = null;       // 現在再生中の Audio 要素
 let ttsCurrentTitle = '';
-
-// バックグラウンド再生を維持するための設定
-ttsAudio.setAttribute('x-webkit-airplay', 'allow');
 
 // Media Session API: ロック画面・通知バーに再生コントロールを表示
 function updateMediaSession(title, playing) {
@@ -979,14 +976,12 @@ function updateMediaSession(title, playing) {
     album: '記事リーダー',
   });
   navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
-
   navigator.mediaSession.setActionHandler('play', () => ttsResume());
   navigator.mediaSession.setActionHandler('pause', () => ttsPause());
   navigator.mediaSession.setActionHandler('stop', () => ttsStop());
   navigator.mediaSession.setActionHandler('nexttrack', () => {
-    // 次のチャンクへスキップ
     if (ttsState === 'playing') {
-      ttsAudio.pause();
+      if (ttsAudio) ttsAudio.pause();
       ttsIndex++;
       savedTtsChunk = ttsIndex;
       if (currentArticleId) dbSavePosition(currentArticleId, ttsIndex);
@@ -994,9 +989,8 @@ function updateMediaSession(title, playing) {
     }
   });
   navigator.mediaSession.setActionHandler('previoustrack', () => {
-    // 前のチャンクへ戻る
     if (ttsIndex > 0) {
-      ttsAudio.pause();
+      if (ttsAudio) ttsAudio.pause();
       ttsIndex = Math.max(0, ttsIndex - 1);
       savedTtsChunk = ttsIndex;
       if (currentArticleId) dbSavePosition(currentArticleId, ttsIndex);
@@ -1005,13 +999,8 @@ function updateMediaSession(title, playing) {
   });
 }
 
-// Google Translate TTS URL生成（1リクエスト最大200文字程度）
-function gttsUrl(text, lang = 'ja') {
-  return `https://translate.google.com/translate_tts?ie=UTF-8&tl=${lang}&client=tw-ob&q=${encodeURIComponent(text)}`;
-}
-
-function splitForTTS(text, maxLen = 180) {
-  // Google Translate TTSは約200文字が上限
+function splitForTTS(text, maxLen = 2500) {
+  // Puter.js (Polly) は最大3000文字。余裕を持って2500で分割
   const sentences = text.split(/(?<=[。！？\.\!\?\n])/);
   const chunks = [];
   let buf = '';
@@ -1032,7 +1021,7 @@ function ttsPlay() {
   const body = document.getElementById('detailBody').textContent;
   if (!body) return;
 
-  ttsAudio.pause();
+  if (ttsAudio) { ttsAudio.pause(); ttsAudio = null; }
   ttsChunks = splitForTTS(body);
   ttsIndex = (savedTtsChunk > 0 && savedTtsChunk < ttsChunks.length)
     ? savedTtsChunk : 0;
@@ -1044,7 +1033,7 @@ function ttsPlay() {
   playCurrentChunk();
 }
 
-function playCurrentChunk() {
+async function playCurrentChunk() {
   if (ttsState !== 'playing') return;
 
   if (ttsIndex >= ttsChunks.length) {
@@ -1053,47 +1042,57 @@ function playCurrentChunk() {
     savedTtsChunk = 0;
     if (currentArticleId) dbSavePosition(currentArticleId, 0);
     updateTtsUI();
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
     onTtsFinished();
     return;
   }
 
   const text = ttsChunks[ttsIndex];
-  ttsAudio.src = gttsUrl(text);
-  ttsAudio.playbackRate = ttsSpeed;
 
-  ttsAudio.oncanplaythrough = () => {
+  try {
+    const audio = await puter.ai.txt2speech(text, {
+      language: 'ja-JP',
+      engine: 'neural'
+    });
+    if (ttsState !== 'playing') return; // 待機中に停止された
+
+    ttsAudio = audio;
     ttsAudio.playbackRate = ttsSpeed;
-  };
 
-  ttsAudio.onended = () => {
+    ttsAudio.onended = () => {
+      if (ttsState === 'playing') {
+        ttsIndex++;
+        savedTtsChunk = ttsIndex;
+        if (currentArticleId) dbSavePosition(currentArticleId, ttsIndex);
+        playCurrentChunk();
+      }
+    };
+
+    ttsAudio.onerror = () => {
+      console.warn('TTS audio error, skipping chunk', ttsIndex);
+      if (ttsState === 'playing') {
+        ttsIndex++;
+        savedTtsChunk = ttsIndex;
+        if (currentArticleId) dbSavePosition(currentArticleId, ttsIndex);
+        playCurrentChunk();
+      }
+    };
+
+    await ttsAudio.play();
+  } catch (e) {
+    console.warn('TTS generation error:', e, '- skipping chunk', ttsIndex);
     if (ttsState === 'playing') {
       ttsIndex++;
       savedTtsChunk = ttsIndex;
       if (currentArticleId) dbSavePosition(currentArticleId, ttsIndex);
-      playCurrentChunk();
+      // 少し待ってリトライ
+      setTimeout(() => playCurrentChunk(), 500);
     }
-  };
-
-  ttsAudio.onerror = () => {
-    console.warn('TTS audio error, skipping chunk', ttsIndex);
-    if (ttsState === 'playing') {
-      ttsIndex++;
-      savedTtsChunk = ttsIndex;
-      if (currentArticleId) dbSavePosition(currentArticleId, ttsIndex);
-      playCurrentChunk();
-    }
-  };
-
-  ttsAudio.play().catch(() => {
-    // autoplay blocked - ユーザー操作が必要
-    showToast('再生するにはもう一度タップしてください');
-    ttsState = 'stopped';
-    updateTtsUI();
-  });
+  }
 }
 
 function ttsPause() {
-  ttsAudio.pause();
+  if (ttsAudio) ttsAudio.pause();
   ttsState = 'paused';
   updateTtsUI();
   updateMediaSession(ttsCurrentTitle, false);
@@ -1101,15 +1100,18 @@ function ttsPause() {
 
 function ttsResume() {
   ttsState = 'playing';
-  ttsAudio.playbackRate = ttsSpeed;
-  ttsAudio.play();
+  if (ttsAudio) {
+    ttsAudio.playbackRate = ttsSpeed;
+    ttsAudio.play();
+  } else {
+    playCurrentChunk();
+  }
   updateTtsUI();
   updateMediaSession(ttsCurrentTitle, true);
 }
 
 function ttsStop() {
-  ttsAudio.pause();
-  ttsAudio.src = '';
+  if (ttsAudio) { ttsAudio.pause(); ttsAudio = null; }
   if (currentArticleId && ttsIndex > 0) {
     savedTtsChunk = ttsIndex;
     dbSavePosition(currentArticleId, ttsIndex);
@@ -1117,9 +1119,7 @@ function ttsStop() {
   ttsState = 'stopped';
   ttsIndex = 0;
   updateTtsUI();
-  if ('mediaSession' in navigator) {
-    navigator.mediaSession.playbackState = 'none';
-  }
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
 }
 
 function updateTtsUI() {
@@ -1137,9 +1137,7 @@ function updateTtsUI() {
 function updateSpeed(val) {
   ttsSpeed = parseFloat(val);
   document.getElementById('speedLabel').textContent = ttsSpeed.toFixed(1) + 'x';
-  if (ttsState === 'playing' || ttsState === 'paused') {
-    ttsAudio.playbackRate = ttsSpeed;
-  }
+  if (ttsAudio) ttsAudio.playbackRate = ttsSpeed;
 }
 
 // Enterキーで保存
