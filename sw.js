@@ -1,4 +1,4 @@
-const CACHE_NAME = 'article-reader-v5';
+const CACHE_NAME = 'article-reader-v6';
 const ASSETS = ['./', './index.html', './manifest.json'];
 
 self.addEventListener('install', e => {
@@ -31,7 +31,14 @@ self.addEventListener('fetch', e => {
   // 外部リクエストはスルー
   if (url.hostname !== location.hostname) return;
 
+  // ネットワーク優先、失敗時にキャッシュ（常に最新版を取得）
   e.respondWith(
-    caches.match(e.request).then(cached => cached || fetch(e.request))
+    fetch(e.request)
+      .then(resp => {
+        const clone = resp.clone();
+        caches.open(CACHE_NAME).then(cache => cache.put(e.request, clone));
+        return resp;
+      })
+      .catch(() => caches.match(e.request))
   );
 });
