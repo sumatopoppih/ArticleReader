@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>記事リーダー</title>
+<link rel="manifest" href="./manifest.json">
+<meta name="theme-color" content="#1a73e8">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📖</text></svg>">
+<style>
+:root {
+  --bg: #f5f5f5; --surface: #ffffff; --primary: #1a73e8;
+  --text: #202124; --text2: #5f6368; --border: #e0e0e0;
+  --danger: #d93025; --radius: 12px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1a1a1a; --surface: #2d2d2d; --primary: #8ab4f8;
+    --text: #e8eaed; --text2: #9aa0a6; --border: #3c4043;
+    --danger: #f28b82;
+  }
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+  background: var(--bg); color: var(--text);
+  min-height: 100dvh; padding-bottom: env(safe-area-inset-bottom);
+}
+/* ヘッダー */
+.header {
+  position: sticky; top: 0; z-index: 100;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 12px 16px; display: flex; align-items: center; gap: 12px;
+}
+.header h1 { font-size: 18px; flex: 1; }
+.header button {
+  background: none; border: none; font-size: 22px; cursor: pointer;
+  color: var(--text); padding: 4px 8px; border-radius: 8px;
+}
+.header button:active { background: var(--border); }
+.back-btn { display: none; }
+
+/* 入力エリア */
+.url-input-area {
+  padding: 12px 16px; background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex; gap: 8px;
+}
+.url-input-area input {
+  flex: 1; padding: 10px 14px; border: 1px solid var(--border);
+  border-radius: var(--radius); font-size: 15px;
+  background: var(--bg); color: var(--text); outline: none;
+}
+.url-input-area input:focus { border-color: var(--primary); }
+.url-input-area button {
+  padding: 10px 18px; background: var(--primary); color: #fff;
+  border: none; border-radius: var(--radius); font-size: 14px;
+  font-weight: 600; cursor: pointer; white-space: nowrap;
+}
+.url-input-area button:disabled { opacity: 0.5; }
+
+/* 記事リスト */
+.article-list { padding: 8px 0; }
+.article-item {
+  display: flex; align-items: center; padding: 14px 16px;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  cursor: pointer; gap: 12px;
+}
+.article-item:active { background: var(--bg); }
+.article-info { flex: 1; min-width: 0; }
+.article-title {
+  font-size: 15px; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.article-meta { font-size: 12px; color: var(--text2); margin-top: 3px; }
+.delete-btn {
+  background: none; border: none; font-size: 18px; cursor: pointer;
+  color: var(--danger); padding: 6px; border-radius: 8px; flex-shrink: 0;
+}
+.empty-state {
+  text-align: center; padding: 60px 20px; color: var(--text2); font-size: 15px;
+}
+
+/* 記事詳細 */
+.detail-view { display: none; }
+.detail-content {
+  padding: 16px; line-height: 1.8; font-size: 15px;
+  max-width: 720px; margin: 0 auto;
+  padding-bottom: 100px;
+}
+.detail-content .detail-title {
+  font-size: 20px; font-weight: 700; margin-bottom: 6px;
+}
+.detail-content .detail-url {
+  font-size: 12px; color: var(--text2); word-break: break-all;
+  margin-bottom: 20px;
+}
+.detail-content .detail-body { white-space: pre-wrap; }
+
+/* TTS コントロールバー */
+.tts-bar {
+  display: none; position: fixed; bottom: 0; left: 0; right: 0;
+  background: var(--surface); border-top: 1px solid var(--border);
+  padding: 10px 16px; padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  z-index: 200;
+}
+.tts-controls {
+  display: flex; gap: 8px; justify-content: center; align-items: center;
+  max-width: 400px; margin: 0 auto;
+}
+.tts-btn {
+  padding: 10px 20px; border: none; border-radius: var(--radius);
+  font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.tts-play { background: var(--primary); color: #fff; }
+.tts-pause { background: #fb8c00; color: #fff; }
+.tts-stop { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+.tts-btn:active { opacity: 0.8; }
+
+/* 速度スライダー */
+.speed-control {
+  display: flex; align-items: center; gap: 6px; margin-top: 8px;
+  justify-content: center; font-size: 12px; color: var(--text2);
+}
+.speed-control input { width: 120px; }
+
+/* ローディング */
+.loading-overlay {
+  display: none; position: fixed; inset: 0; z-index: 300;
+  background: rgba(0,0,0,0.3); justify-content: center; align-items: center;
+}
+.loading-overlay.active { display: flex; }
+.spinner {
+  width: 40px; height: 40px; border: 4px solid var(--border);
+  border-top-color: var(--primary); border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* トースト */
+.toast {
+  position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+  background: #323232; color: #fff; padding: 10px 20px;
+  border-radius: 8px; font-size: 14px; z-index: 400;
+  opacity: 0; transition: opacity 0.3s; pointer-events: none;
+}
+.toast.show { opacity: 1; }
+
+/* タブバー */
+.tab-bar {
+  display: flex; background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  flex: 1; padding: 10px; border: none; background: none;
+  font-size: 14px; font-weight: 600; cursor: pointer;
+  color: var(--text2); border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+}
+.tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+.tab:active { background: var(--bg); }
+
+/* アーカイブ済みアイテム */
+.article-item.archived { opacity: 0.6; }
+.archive-btn {
+  background: none; border: none; font-size: 16px; cursor: pointer;
+  color: var(--text2); padding: 6px; border-radius: 8px; flex-shrink: 0;
+}
+
+</style>
+</head>
+<body>
+
+<!-- リスト画面 -->
+<div id="listView">
+  <div class="header">
+    <h1>📖 記事リーダー</h1>
+  </div>
+  <div class="url-input-area">
+    <input type="url" id="urlInput" placeholder="記事のURLを貼り付け" autocomplete="off">
+    <button id="saveBtn" onclick="saveArticle()">保存</button>
+  </div>
+  <div class="tab-bar">
+    <button class="tab active" id="tabActive" onclick="switchTab('active')">未読</button>
+    <button class="tab" id="tabArchived" onclick="switchTab('archived')">アーカイブ</button>
+  </div>
+  <div id="articleList" class="article-list"></div>
+  <div id="emptyState" class="empty-state">
+    URLを入力して記事を保存しましょう<br>
+    <small>本文を抽出してオフラインで読み上げできます</small><br><br>
+    <small style="color:var(--primary)">💡 Chromeメニュー →「ホーム画面に追加」で<br>共有メニューから直接保存できます</small>
+  </div>
+</div>
+
+<!-- 詳細画面 -->
+<div id="detailView" class="detail-view">
+  <div class="header">
+    <button class="back-btn" style="display:block" onclick="showList()">←</button>
+    <h1 id="detailHeaderTitle">記事</h1>
+  </div>
+  <div class="detail-content">
+    <div class="detail-title" id="detailTitle"></div>
+    <div class="detail-url" id="detailUrl"></div>
+    <div class="detail-body" id="detailBody"></div>
+  </div>
+  <div class="tts-bar" id="ttsBar">
+    <div class="tts-controls">
+      <button class="tts-btn tts-play" id="playBtn" onclick="ttsPlay()">▶ 読み上げ</button>
+      <button class="tts-btn tts-pause" id="pauseBtn" onclick="ttsPause()" style="display:none">⏸ 一時停止</button>
+      <button class="tts-btn tts-play" id="resumeBtn" onclick="ttsResume()" style="display:none">▶ 再開</button>
+      <button class="tts-btn tts-stop" id="stopBtn" onclick="ttsStop()" style="display:none">⏹ 停止</button>
+    </div>
+    <div class="speed-control">
+      <span>遅い</span>
+      <input type="range" id="speedSlider" min="0.5" max="2.0" step="0.1" value="1.0"
+             oninput="updateSpeed(this.value)">
+      <span>速い</span>
+      <span id="speedLabel">1.0x</span>
+    </div>
+  </div>
+</div>
+
+<div class="loading-overlay" id="loading"><div class="spinner"></div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+// ============================================================
+// IndexedDB (オフライン保存)
+// ============================================================
+const DB_NAME = 'ArticleReaderDB';
+const DB_VERSION = 2;
+const STORE = 'articles';
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = e => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(STORE)) {
+        db.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
+      }
+      // v2: 既存レコードに archived フラグを追加（新規は dbAdd で設定）
+    };
+    req.onsuccess = e => resolve(e.target.result);
+    req.onerror = e => reject(e.target.error);
+  });
+}
+
+async function dbGetAll() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly');
+    const store = tx.objectStore(STORE);
+    const req = store.getAll();
+    // 古い順（savedAt昇順）で返す
+    req.onsuccess = () => {
+      const all = req.result;
+      all.sort((a, b) => a.savedAt - b.savedAt);
+      resolve(all);
+    };
+    req.onerror = e => reject(e.target.error);
+  });
+}
+
+async function dbAdd(article) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    const req = store.add(article);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = e => reject(e.target.error);
+  });
+}
+
+async function dbDelete(id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    const req = store.delete(id);
+    req.onsuccess = () => resolve();
+    req.onerror = e => reject(e.target.error);
+  });
+}
+
+async function dbGet(id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly');
+    const store = tx.objectStore(STORE);
+    const req = store.get(id);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = e => reject(e.target.error);
+  });
+}
+
+async function dbUpdate(article) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const store = tx.objectStore(STORE);
+    const req = store.put(article);
+    req.onsuccess = () => resolve();
+    req.onerror = e => reject(e.target.error);
+  });
+}
+
+async function dbArchive(id) {
+  const article = await dbGet(id);
+  if (article) {
+    article.archived = true;
+    await dbUpdate(article);
+  }
+}
+
+async function dbUnarchive(id) {
+  const article = await dbGet(id);
+  if (article) {
+    article.archived = false;
+    await dbUpdate(article);
+  }
+}
+
+// ============================================================
+// 記事取得・本文抽出
+// ============================================================
+// CORSプロキシ経由でHTMLを取得し、本文を抽出する
+const CORS_PROXIES = [
+  url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+];
+
+async function fetchHTML(url) {
+  let lastError;
+  for (const proxy of CORS_PROXIES) {
+    try {
+      const resp = await fetch(proxy(url), { signal: AbortSignal.timeout(20000) });
+      if (resp.ok) return await resp.text();
+    } catch (e) { lastError = e; }
+  }
+  throw new Error('記事を取得できませんでした: ' + (lastError?.message || ''));
+}
+
+// ============================================================
+// ページ分割記事の全ページ取得
+// ============================================================
+
+// HTMLからページネーションリンクを検出し、最大ページ数を返す
+function detectMaxPage(html, baseUrl) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  const urlObj = new URL(baseUrl);
+  let maxPage = 1;
+
+  // パターン1: ページネーションリンクから数字を収集
+  // 「次のページ」「次へ」「>」「>>」やページ番号リンクを探す
+  const pageNums = new Set();
+  const allLinks = doc.querySelectorAll('a[href]');
+
+  for (const a of allLinks) {
+    const href = a.getAttribute('href') || '';
+    const text = a.textContent.trim();
+
+    // ?page=N パターン (JBpress, 東洋経済, ダイヤモンド等)
+    const pageParam = href.match(/[?&]page=(\d+)/);
+    if (pageParam) { pageNums.add(parseInt(pageParam[1])); continue; }
+
+    // /articles/-/XXXXX/N パターン (JBpress代替形式)
+    const pathPage = href.match(/\/articles\/[^/]+\/[^/]+\/(\d+)/);
+    if (pathPage) { pageNums.add(parseInt(pathPage[1])); continue; }
+
+    // /N or /page/N パターン末尾 (ITmedia, Gigazine等)
+    const trailingPage = href.match(/\/page\/(\d+)\/?$/);
+    if (trailingPage) { pageNums.add(parseInt(trailingPage[1])); continue; }
+    const trailingNum = href.match(/\/(\d+)\/?$/);
+    if (trailingNum && isSameDomain(href, baseUrl)) {
+      const n = parseInt(trailingNum[1]);
+      if (n >= 2 && n <= 30) pageNums.add(n);
+    }
+
+    // リンクテキストが数字のみ
+    if (/^\d+$/.test(text)) {
+      const n = parseInt(text);
+      if (n >= 2 && n <= 30) pageNums.add(n);
+    }
+  }
+
+  // rel="next" の存在チェック
+  const relNext = doc.querySelector('link[rel="next"], a[rel="next"]');
+  if (relNext && pageNums.size === 0) {
+    // rel=nextがあるが具体的なページ数不明 → 逐次取得モードへ
+    return -1; // 特殊値: 逐次取得
+  }
+
+  if (pageNums.size > 0) {
+    maxPage = Math.max(...pageNums);
+  }
+
+  return maxPage;
+}
+
+function isSameDomain(href, baseUrl) {
+  try {
+    const a = new URL(href, baseUrl);
+    const b = new URL(baseUrl);
+    return a.hostname === b.hostname;
+  } catch { return false; }
+}
+
+// ページURLを生成する（サイトごとのパターンに対応）
+function buildPageUrl(baseUrl, pageNum) {
+  const urlObj = new URL(baseUrl);
+
+  // すでに ?page= がある場合は置換
+  if (urlObj.searchParams.has('page')) {
+    urlObj.searchParams.set('page', pageNum);
+    return urlObj.toString();
+  }
+
+  // JBpress系: /articles/-/XXXXX → ?page=N
+  if (/\/articles\//.test(urlObj.pathname)) {
+    urlObj.searchParams.set('page', pageNum);
+    return urlObj.toString();
+  }
+
+  // 東洋経済: /articles/-/XXXXX?page=N
+  if (/toyokeizai|diamond|president|gendai|jbpress|ismedia/.test(urlObj.hostname)) {
+    urlObj.searchParams.set('page', pageNum);
+    return urlObj.toString();
+  }
+
+  // ITmedia系: 末尾に /N を付ける
+  if (/itmedia|gigazine/.test(urlObj.hostname)) {
+    const path = urlObj.pathname.replace(/\/\d+\/?$/, '');
+    urlObj.pathname = path + '/' + pageNum;
+    return urlObj.toString();
+  }
+
+  // デフォルト: ?page=N
+  urlObj.searchParams.set('page', pageNum);
+  return urlObj.toString();
+}
+
+// 全ページのHTMLを取得して本文を結合
+async function fetchAllPages(url) {
+  // 1ページ目を取得
+  const firstHtml = await fetchHTML(url);
+  const maxPage = detectMaxPage(firstHtml, url);
+
+  if (maxPage <= 1 && maxPage !== -1) {
+    // 単一ページ記事
+    return { htmls: [firstHtml], pageCount: 1 };
+  }
+
+  const htmls = [firstHtml];
+
+  if (maxPage === -1) {
+    // 逐次取得モード: 404やリダイレクトまで取得
+    for (let p = 2; p <= 20; p++) {
+      try {
+        const pageUrl = buildPageUrl(url, p);
+        const html = await fetchHTML(pageUrl);
+        // 1ページ目と同じ内容ならページ分割終了
+        if (html.length < 500 || isSameContent(firstHtml, html)) break;
+        htmls.push(html);
+      } catch { break; }
+    }
+  } else {
+    // 既知のページ数分を並列取得
+    const fetches = [];
+    for (let p = 2; p <= Math.min(maxPage, 20); p++) {
+      fetches.push(
+        fetchHTML(buildPageUrl(url, p)).catch(() => null)
+      );
+    }
+    const results = await Promise.all(fetches);
+    for (const html of results) {
+      if (html && html.length > 500 && !isSameContent(firstHtml, html)) {
+        htmls.push(html);
+      }
+    }
+  }
+
+  return { htmls, pageCount: htmls.length };
+}
+
+// 2つのHTMLが実質同じ内容かチェック（リダイレクトで1ページ目に戻された場合の検出）
+function isSameContent(html1, html2) {
+  const extract = h => h.replace(/<[^>]*>/g, '').replace(/\s+/g, '').slice(0, 500);
+  return extract(html1) === extract(html2);
+}
+
+function extractBodyText(html) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+
+  // 不要要素を除去
+  const removeSelectors = [
+    'script', 'style', 'nav', 'header', 'footer', 'aside',
+    'iframe', 'noscript', '.ad', '.ads', '.advertisement',
+    '.sidebar', '.menu', '.nav', '.comment', '.comments',
+    '.social', '.share', '.related', '[role="navigation"]',
+    '[role="banner"]', '[role="complementary"]',
+    '.pagination', '.pager', '.page-nav', '.page-link',
+    '.breadcrumb', '.author-info', '.article-header'
+  ];
+  removeSelectors.forEach(sel => {
+    doc.querySelectorAll(sel).forEach(el => el.remove());
+  });
+
+  // 本文候補を探す
+  const candidates = [
+    doc.querySelector('article'),
+    doc.querySelector('[role="main"]'),
+    doc.querySelector('.post-content'),
+    doc.querySelector('.entry-content'),
+    doc.querySelector('.article-body'),
+    doc.querySelector('.article-content'),
+    doc.querySelector('.content'),
+    doc.querySelector('main'),
+  ].filter(Boolean);
+
+  let contentEl = candidates[0];
+
+  if (!contentEl) {
+    let maxLen = 0;
+    doc.querySelectorAll('div, section').forEach(el => {
+      const text = el.textContent?.trim() || '';
+      if (text.length > maxLen) {
+        maxLen = text.length;
+        contentEl = el;
+      }
+    });
+  }
+
+  const rawText = contentEl?.textContent || doc.body?.textContent || '';
+  return rawText
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l.length > 0)
+    .join('\n');
+}
+
+function extractArticle(htmls, url) {
+  // 1ページ目からタイトルを取得
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(htmls[0], 'text/html');
+  const ogTitle = doc.querySelector('meta[property="og:title"]')?.content;
+  const title = ogTitle || doc.querySelector('title')?.textContent || '無題';
+
+  // 各ページの本文を抽出して結合
+  const contents = htmls.map(html => extractBodyText(html));
+
+  // ページ間の重複テキストを除去（ヘッダー/フッター等の共通部分）
+  let combined = contents[0];
+  for (let i = 1; i < contents.length; i++) {
+    const pageText = contents[i];
+    // 前ページの末尾と重複する部分を検出して除去
+    const deduped = deduplicatePageText(combined, pageText);
+    combined += '\n\n' + deduped;
+  }
+
+  return { title: title.trim(), content: combined };
+}
+
+// ページ間の重複テキストを除去
+function deduplicatePageText(prevText, newText) {
+  // 前ページの末尾100文字と新ページの先頭を比較
+  const prevTail = prevText.slice(-200);
+  const newLines = newText.split('\n');
+  let skipUntil = 0;
+
+  for (let i = 0; i < Math.min(newLines.length, 10); i++) {
+    const line = newLines[i].trim();
+    if (line.length > 20 && prevTail.includes(line)) {
+      skipUntil = i + 1;
+    }
+  }
+
+  return newLines.slice(skipUntil).join('\n');
+}
+
+// ============================================================
+// UI操作
+// ============================================================
+let currentArticleId = null;
+let currentTab = 'active'; // 'active' | 'archived'
+let activeArticleIds = []; // 未読記事のID一覧（古い順）
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.getElementById('tabActive').classList.toggle('active', tab === 'active');
+  document.getElementById('tabArchived').classList.toggle('active', tab === 'archived');
+  renderList();
+}
+
+async function renderList() {
+  const allArticles = await dbGetAll();
+  const articles = allArticles.filter(a =>
+    currentTab === 'active' ? !a.archived : a.archived
+  );
+  // 未読記事IDリストを更新（自動遷移用）
+  activeArticleIds = allArticles.filter(a => !a.archived).map(a => a.id);
+
+  const list = document.getElementById('articleList');
+  const empty = document.getElementById('emptyState');
+
+  if (articles.length === 0) {
+    list.innerHTML = '';
+    empty.style.display = 'block';
+    empty.innerHTML = currentTab === 'active'
+      ? 'URLを入力して記事を保存しましょう<br><small>本文を抽出してオフラインで読み上げできます</small><br><br><small style="color:var(--primary)">💡 Chromeメニュー →「ホーム画面に追加」で<br>共有メニューから直接保存できます</small>'
+      : '<small>アーカイブされた記事はありません</small>';
+    return;
+  }
+  empty.style.display = 'none';
+
+  list.innerHTML = articles.map(a => `
+    <div class="article-item${a.archived ? ' archived' : ''}" onclick="showDetail(${a.id})">
+      <div class="article-info">
+        <div class="article-title">${escapeHtml(a.title)}</div>
+        <div class="article-meta">${new Date(a.savedAt).toLocaleString('ja-JP')} · ${Math.ceil(a.content.length / 500)}分</div>
+      </div>
+      ${a.archived
+        ? `<button class="archive-btn" onclick="event.stopPropagation(); unarchiveArticle(${a.id})" title="未読に戻す">↩️</button>`
+        : `<button class="archive-btn" onclick="event.stopPropagation(); archiveArticle(${a.id})" title="アーカイブ">📥</button>`
+      }
+      <button class="delete-btn" onclick="event.stopPropagation(); deleteArticle(${a.id})" title="削除">🗑</button>
+    </div>
+  `).join('');
+}
+
+function escapeHtml(str) {
+  const d = document.createElement('div');
+  d.textContent = str;
+  return d.innerHTML;
+}
+
+async function saveArticle() {
+  const input = document.getElementById('urlInput');
+  const url = input.value.trim();
+  if (!url) return;
+
+  try { new URL(url); } catch {
+    showToast('有効なURLを入力してください');
+    return;
+  }
+
+  showLoading(true);
+  try {
+    const { htmls, pageCount } = await fetchAllPages(url);
+    const { title, content } = extractArticle(htmls, url);
+    if (content.length < 50) {
+      showToast('本文を十分に抽出できませんでした');
+      showLoading(false);
+      return;
+    }
+    await dbAdd({ url, title, content, savedAt: Date.now(), archived: false });
+    input.value = '';
+    await renderList();
+    const pageMsg = pageCount > 1 ? ` (${pageCount}ページ結合)` : '';
+    showToast(`保存しました${pageMsg}`);
+  } catch (e) {
+    showToast(e.message);
+  }
+  showLoading(false);
+}
+
+async function archiveArticle(id) {
+  await dbArchive(id);
+  await renderList();
+  showToast('アーカイブしました');
+}
+
+async function unarchiveArticle(id) {
+  await dbUnarchive(id);
+  await renderList();
+  showToast('未読に戻しました');
+}
+
+async function deleteArticle(id) {
+  if (!confirm('この記事を削除しますか？')) return;
+  await dbDelete(id);
+  await renderList();
+  showToast('削除しました');
+}
+
+async function showDetail(id) {
+  const article = await dbGet(id);
+  if (!article) return;
+  currentArticleId = id;
+
+  document.getElementById('detailHeaderTitle').textContent = article.title;
+  document.getElementById('detailTitle').textContent = article.title;
+  document.getElementById('detailUrl').textContent = article.url;
+  document.getElementById('detailBody').textContent = article.content;
+
+  document.getElementById('listView').style.display = 'none';
+  document.getElementById('detailView').style.display = 'block';
+  document.getElementById('ttsBar').style.display = 'block';
+  ttsStop();
+  window.scrollTo(0, 0);
+}
+
+function showList() {
+  ttsStop();
+  document.getElementById('detailView').style.display = 'none';
+  document.getElementById('listView').style.display = 'block';
+  document.getElementById('ttsBar').style.display = 'none';
+  currentArticleId = null;
+  renderList();
+}
+
+// 次の未読記事IDを取得
+function getNextActiveArticleId() {
+  const idx = activeArticleIds.indexOf(currentArticleId);
+  if (idx === -1 || idx + 1 >= activeArticleIds.length) return null;
+  return activeArticleIds[idx + 1];
+}
+
+// 読み上げ完了後: アーカイブ → 次の記事へ自動遷移
+async function onTtsFinished() {
+  if (!currentArticleId) return;
+
+  const nextId = getNextActiveArticleId();
+
+  // 現在の記事をアーカイブ
+  await dbArchive(currentArticleId);
+  // activeArticleIds を更新
+  activeArticleIds = activeArticleIds.filter(id => id !== currentArticleId);
+
+  if (nextId) {
+    showToast('アーカイブ → 次の記事へ');
+    await showDetail(nextId);
+    // 少し間を置いてから読み上げ開始
+    setTimeout(() => ttsPlay(), 800);
+  } else {
+    showToast('全記事の読み上げ完了');
+    showList();
+  }
+}
+
+function showLoading(on) {
+  document.getElementById('loading').classList.toggle('active', on);
+  document.getElementById('saveBtn').disabled = on;
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+// ============================================================
+// TTS 読み上げ (Web Speech API)
+// ============================================================
+let ttsUtterances = [];
+let ttsIndex = 0;
+let ttsState = 'stopped'; // stopped | playing | paused
+let ttsSpeed = 1.0;
+
+function splitForTTS(text, maxLen = 200) {
+  // 文単位で分割（。！？で区切る）
+  const sentences = text.split(/(?<=[。！？\n])/);
+  const chunks = [];
+  let buf = '';
+  for (const s of sentences) {
+    if ((buf + s).length > maxLen && buf.length > 0) {
+      chunks.push(buf);
+      buf = '';
+    }
+    buf += s;
+  }
+  if (buf) chunks.push(buf);
+  return chunks;
+}
+
+function ttsPlay() {
+  const body = document.getElementById('detailBody').textContent;
+  if (!body) return;
+
+  speechSynthesis.cancel();
+  ttsUtterances = splitForTTS(body);
+  ttsIndex = 0;
+  ttsState = 'playing';
+  updateTtsUI();
+  speakChunk();
+}
+
+function speakChunk() {
+  if (ttsIndex >= ttsUtterances.length) {
+    // 全チャンク読み上げ完了 → アーカイブ＆次の記事へ
+    speechSynthesis.cancel();
+    ttsState = 'stopped';
+    ttsIndex = 0;
+    updateTtsUI();
+    onTtsFinished();
+    return;
+  }
+  const utter = new SpeechSynthesisUtterance(ttsUtterances[ttsIndex]);
+  utter.lang = 'ja-JP';
+  utter.rate = ttsSpeed;
+
+  // 日本語音声を優先選択
+  const voices = speechSynthesis.getVoices();
+  const jaVoice = voices.find(v => v.lang.startsWith('ja'));
+  if (jaVoice) utter.voice = jaVoice;
+
+  utter.onend = () => {
+    if (ttsState === 'playing') {
+      ttsIndex++;
+      speakChunk();
+    }
+  };
+  utter.onerror = (e) => {
+    if (e.error !== 'canceled') {
+      console.error('TTS error:', e);
+      ttsStop();
+    }
+  };
+  speechSynthesis.speak(utter);
+}
+
+function ttsPause() {
+  speechSynthesis.pause();
+  ttsState = 'paused';
+  updateTtsUI();
+}
+
+function ttsResume() {
+  speechSynthesis.resume();
+  ttsState = 'playing';
+  updateTtsUI();
+}
+
+function ttsStop() {
+  speechSynthesis.cancel();
+  ttsState = 'stopped';
+  ttsIndex = 0;
+  updateTtsUI();
+}
+
+function updateTtsUI() {
+  const play = document.getElementById('playBtn');
+  const pause = document.getElementById('pauseBtn');
+  const resume = document.getElementById('resumeBtn');
+  const stop = document.getElementById('stopBtn');
+
+  play.style.display = ttsState === 'stopped' ? '' : 'none';
+  pause.style.display = ttsState === 'playing' ? '' : 'none';
+  resume.style.display = ttsState === 'paused' ? '' : 'none';
+  stop.style.display = ttsState !== 'stopped' ? '' : 'none';
+}
+
+function updateSpeed(val) {
+  ttsSpeed = parseFloat(val);
+  document.getElementById('speedLabel').textContent = ttsSpeed.toFixed(1) + 'x';
+}
+
+// Chromeバグ対策: 長文読み上げが途中で止まる問題を回避
+setInterval(() => {
+  if (ttsState === 'playing' && speechSynthesis.speaking) {
+    speechSynthesis.pause();
+    speechSynthesis.resume();
+  }
+}, 10000);
+
+// 音声リスト読み込み
+speechSynthesis.onvoiceschanged = () => {};
+
+// Enterキーで保存
+document.getElementById('urlInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') saveArticle();
+});
+
+// 戻るボタン対応
+window.addEventListener('popstate', () => {
+  if (document.getElementById('detailView').style.display === 'block') {
+    showList();
+  }
+});
+
+// 初期表示
+renderList();
+
+// ============================================================
+// PWA: Service Worker 登録
+// ============================================================
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').catch(() => {});
+}
+
+// ============================================================
+// 共有メニューからのURL受信 (Web Share Target API)
+// ============================================================
+// Androidの共有メニューから起動された場合、URLパラメータにデータが入る
+(function handleShareTarget() {
+  const params = new URLSearchParams(window.location.search);
+  const sharedUrl = params.get('url') || '';
+  const sharedText = params.get('text') || '';
+  const sharedTitle = params.get('title') || '';
+
+  // URLを抽出（url パラメータ優先、なければ text からURL抽出）
+  let targetUrl = '';
+  if (sharedUrl && sharedUrl.startsWith('http')) {
+    targetUrl = sharedUrl;
+  } else if (sharedText) {
+    const urlMatch = sharedText.match(/https?:\/\/\S+/);
+    if (urlMatch) targetUrl = urlMatch[0];
+  }
+
+  if (targetUrl) {
+    // URLパラメータをクリーンアップ（履歴を汚さない）
+    history.replaceState(null, '', window.location.pathname);
+    // 入力欄にセットして自動保存
+    document.getElementById('urlInput').value = targetUrl;
+    // 少し待ってから保存（DOMの準備完了を確実にする）
+    setTimeout(() => saveArticle(), 300);
+  }
+})();
+</script>
+</body>
+</html>
