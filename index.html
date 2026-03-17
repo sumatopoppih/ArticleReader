@@ -965,6 +965,45 @@ let ttsIndex = 0;
 let ttsState = 'stopped'; // stopped | playing | paused
 let ttsSpeed = 2.0;
 let ttsAudio = new Audio();
+let ttsCurrentTitle = '';
+
+// バックグラウンド再生を維持するための設定
+ttsAudio.setAttribute('x-webkit-airplay', 'allow');
+
+// Media Session API: ロック画面・通知バーに再生コントロールを表示
+function updateMediaSession(title, playing) {
+  if (!('mediaSession' in navigator)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: title || '記事リーダー',
+    artist: '記事読み上げ中',
+    album: '記事リーダー',
+  });
+  navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
+
+  navigator.mediaSession.setActionHandler('play', () => ttsResume());
+  navigator.mediaSession.setActionHandler('pause', () => ttsPause());
+  navigator.mediaSession.setActionHandler('stop', () => ttsStop());
+  navigator.mediaSession.setActionHandler('nexttrack', () => {
+    // 次のチャンクへスキップ
+    if (ttsState === 'playing') {
+      ttsAudio.pause();
+      ttsIndex++;
+      savedTtsChunk = ttsIndex;
+      if (currentArticleId) dbSavePosition(currentArticleId, ttsIndex);
+      playCurrentChunk();
+    }
+  });
+  navigator.mediaSession.setActionHandler('previoustrack', () => {
+    // 前のチャンクへ戻る
+    if (ttsIndex > 0) {
+      ttsAudio.pause();
+      ttsIndex = Math.max(0, ttsIndex - 1);
+      savedTtsChunk = ttsIndex;
+      if (currentArticleId) dbSavePosition(currentArticleId, ttsIndex);
+      if (ttsState === 'playing') playCurrentChunk();
+    }
+  });
+}
 
 // Google Translate TTS URL生成（1リクエスト最大200文字程度）
 function gttsUrl(text, lang = 'ja') {
@@ -998,7 +1037,9 @@ function ttsPlay() {
   ttsIndex = (savedTtsChunk > 0 && savedTtsChunk < ttsChunks.length)
     ? savedTtsChunk : 0;
   ttsState = 'playing';
+  ttsCurrentTitle = document.getElementById('detailTitle').textContent || '記事';
   updateTtsUI();
+  updateMediaSession(ttsCurrentTitle, true);
   document.getElementById('playBtn').textContent = '▶ 読み上げ';
   playCurrentChunk();
 }
@@ -1055,6 +1096,7 @@ function ttsPause() {
   ttsAudio.pause();
   ttsState = 'paused';
   updateTtsUI();
+  updateMediaSession(ttsCurrentTitle, false);
 }
 
 function ttsResume() {
@@ -1062,6 +1104,7 @@ function ttsResume() {
   ttsAudio.playbackRate = ttsSpeed;
   ttsAudio.play();
   updateTtsUI();
+  updateMediaSession(ttsCurrentTitle, true);
 }
 
 function ttsStop() {
@@ -1074,6 +1117,9 @@ function ttsStop() {
   ttsState = 'stopped';
   ttsIndex = 0;
   updateTtsUI();
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.playbackState = 'none';
+  }
 }
 
 function updateTtsUI() {
@@ -1108,10 +1154,22 @@ window.addEventListener('popstate', () => {
   }
 });
 
-// 離脱時に読み上げ位置を保存
+// 離脱時に読み上げ位置を保存 & 復帰時に再生再開
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden' && currentArticleId && ttsIndex > 0) {
-    dbSavePosition(currentArticleId, ttsIndex);
+  if (document.visibilityState === 'hidden') {
+    // バックグラウンドに移行 → 位置を保存
+    if (currentArticleId && ttsIndex > 0) {
+      dbSavePosition(currentArticleId, ttsIndex);
+    }
+  } else if (document.visibilityState === 'visible') {
+    // フォアグラウンドに復帰 → 再生が止まっていたら再開
+    if (ttsState === 'playing' && ttsAudio.paused && ttsAudio.src) {
+      console.log('Resuming TTS after visibility change');
+      ttsAudio.play().catch(() => {
+        // 再生できなければ現在のチャンクからやり直し
+        playCurrentChunk();
+      });
+    }
   }
 });
 window.addEventListener('beforeunload', () => {
