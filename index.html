@@ -957,26 +957,31 @@ function showToast(msg) {
 }
 
 // ============================================================
-// TTS 読み上げ (Web Speech API)
+// TTS 読み上げ (Web Speech API) - 安定化版
 // ============================================================
 let ttsUtterances = [];
 let ttsIndex = 0;
 let ttsState = 'stopped'; // stopped | playing | paused
 let ttsSpeed = 1.0;
+let ttsWatchdog = null;     // 無音検出タイマー
+let ttsKeepAlive = null;    // Chrome pause/resume キープアライブ
 
-function splitForTTS(text, maxLen = 200) {
-  // 文単位で分割（。！？で区切る）
-  const sentences = text.split(/(?<=[。！？\n])/);
+function splitForTTS(text, maxLen = 80) {
+  // 短めのチャンクに分割（Chromeの無音タイムアウトを回避）
+  // 句点・改行で区切り、maxLen以内に収める
+  const sentences = text.split(/(?<=[。！？\.\!\?\n])/);
   const chunks = [];
   let buf = '';
   for (const s of sentences) {
-    if ((buf + s).length > maxLen && buf.length > 0) {
-      chunks.push(buf);
+    const trimmed = s.trim();
+    if (!trimmed) continue;
+    if ((buf + trimmed).length > maxLen && buf.length > 0) {
+      chunks.push(buf.trim());
       buf = '';
     }
-    buf += s;
+    buf += trimmed;
   }
-  if (buf) chunks.push(buf);
+  if (buf.trim()) chunks.push(buf.trim());
   return chunks;
 }
 
@@ -993,14 +998,18 @@ function ttsPlay() {
 
   ttsState = 'playing';
   updateTtsUI();
-  // 再生開始したらボタンラベルをリセット
   document.getElementById('playBtn').textContent = '▶ 読み上げ';
+  startKeepAlive();
   speakChunk();
 }
 
 function speakChunk() {
+  // ウォッチドッグをリセット
+  clearWatchdog();
+
   if (ttsIndex >= ttsUtterances.length) {
-    // 全チャンク読み上げ完了 → 位置リセット＆アーカイブ＆次の記事へ
+    // 全チャンク読み上げ完了
+    stopKeepAlive();
     speechSynthesis.cancel();
     ttsState = 'stopped';
     ttsIndex = 0;
@@ -1010,7 +1019,9 @@ function speakChunk() {
     onTtsFinished();
     return;
   }
-  const utter = new SpeechSynthesisUtterance(ttsUtterances[ttsIndex]);
+
+  const text = ttsUtterances[ttsIndex];
+  const utter = new SpeechSynthesisUtterance(text);
   utter.lang = 'ja-JP';
   utter.rate = ttsSpeed;
 
@@ -1019,39 +1030,94 @@ function speakChunk() {
   const jaVoice = voices.find(v => v.lang.startsWith('ja'));
   if (jaVoice) utter.voice = jaVoice;
 
-  utter.onend = () => {
+  let ended = false;
+
+  const onChunkDone = () => {
+    if (ended) return;
+    ended = true;
+    clearWatchdog();
     if (ttsState === 'playing') {
       ttsIndex++;
-      // 読み上げ位置をDBに保存（チャンクごと）
       savedTtsChunk = ttsIndex;
       if (currentArticleId) dbSavePosition(currentArticleId, ttsIndex);
-      speakChunk();
+      // 次のチャンクを少し遅延して開始（安定性向上）
+      setTimeout(() => speakChunk(), 50);
     }
   };
+
+  utter.onend = onChunkDone;
+
   utter.onerror = (e) => {
-    if (e.error !== 'canceled') {
-      console.error('TTS error:', e);
-      ttsStop();
+    if (e.error === 'canceled') return;
+    console.warn('TTS error:', e.error, '- retrying chunk', ttsIndex);
+    ended = true;
+    clearWatchdog();
+    // エラー時はリトライ
+    if (ttsState === 'playing') {
+      setTimeout(() => speakChunk(), 300);
     }
   };
+
   speechSynthesis.speak(utter);
+
+  // ウォッチドッグ: チャンクの推定読み上げ時間 + 余裕を超えたら強制的に次へ
+  // 日本語は約5〜7文字/秒、速度倍率を考慮
+  const estimatedMs = (text.length / (5 * ttsSpeed)) * 1000 + 5000;
+  ttsWatchdog = setTimeout(() => {
+    if (!ended && ttsState === 'playing') {
+      console.warn('TTS watchdog: chunk', ttsIndex, 'timed out, forcing next');
+      speechSynthesis.cancel();
+      onChunkDone();
+    }
+  }, Math.max(estimatedMs, 8000));
+}
+
+function clearWatchdog() {
+  if (ttsWatchdog) { clearTimeout(ttsWatchdog); ttsWatchdog = null; }
+}
+
+// Chrome の長時間読み上げ停止バグ対策
+// 定期的に pause/resume を呼んでセッションを維持
+function startKeepAlive() {
+  stopKeepAlive();
+  ttsKeepAlive = setInterval(() => {
+    if (ttsState === 'playing' && speechSynthesis.speaking && !speechSynthesis.paused) {
+      speechSynthesis.pause();
+      speechSynthesis.resume();
+    }
+  }, 5000);
+}
+
+function stopKeepAlive() {
+  if (ttsKeepAlive) { clearInterval(ttsKeepAlive); ttsKeepAlive = null; }
 }
 
 function ttsPause() {
   speechSynthesis.pause();
   ttsState = 'paused';
+  clearWatchdog();
+  stopKeepAlive();
   updateTtsUI();
 }
 
 function ttsResume() {
   speechSynthesis.resume();
   ttsState = 'playing';
+  startKeepAlive();
   updateTtsUI();
+  // resume後に止まることがあるので、ウォッチドッグを設定
+  ttsWatchdog = setTimeout(() => {
+    if (ttsState === 'playing' && !speechSynthesis.speaking) {
+      console.warn('TTS resume failed, restarting chunk', ttsIndex);
+      speakChunk();
+    }
+  }, 3000);
 }
 
 function ttsStop() {
+  clearWatchdog();
+  stopKeepAlive();
   speechSynthesis.cancel();
-  // 停止時に現在位置を保存
   if (currentArticleId && ttsIndex > 0) {
     savedTtsChunk = ttsIndex;
     dbSavePosition(currentArticleId, ttsIndex);
@@ -1077,14 +1143,6 @@ function updateSpeed(val) {
   ttsSpeed = parseFloat(val);
   document.getElementById('speedLabel').textContent = ttsSpeed.toFixed(1) + 'x';
 }
-
-// Chromeバグ対策: 長文読み上げが途中で止まる問題を回避
-setInterval(() => {
-  if (ttsState === 'playing' && speechSynthesis.speaking) {
-    speechSynthesis.pause();
-    speechSynthesis.resume();
-  }
-}, 10000);
 
 // 音声リスト読み込み
 speechSynthesis.onvoiceschanged = () => {};
