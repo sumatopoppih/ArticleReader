@@ -957,31 +957,27 @@ function showToast(msg) {
 }
 
 // ============================================================
-// TTS 読み上げ (Web Speech API) - 安定化版
+// TTS 読み上げ - 超安定版
+// speechSynthesis のキューを使わず、1チャンクずつ完全に完了してから次を発射
+// pause/resume は使わない（Chromeで壊れているため）
+// 代わりにチャンク間で停止/再開する方式
 // ============================================================
-let ttsUtterances = [];
+let ttsChunks = [];
 let ttsIndex = 0;
 let ttsState = 'stopped'; // stopped | playing | paused
 let ttsSpeed = 1.0;
-let ttsWatchdog = null;     // 無音検出タイマー
-let ttsKeepAlive = null;    // Chrome pause/resume キープアライブ
+let ttsTimer = null;
+let ttsRetryCount = 0;
+const TTS_MAX_RETRY = 3;
 
-function splitForTTS(text, maxLen = 80) {
-  // 短めのチャンクに分割（Chromeの無音タイムアウトを回避）
-  // 句点・改行で区切り、maxLen以内に収める
-  const sentences = text.split(/(?<=[。！？\.\!\?\n])/);
+function splitForTTS(text) {
+  // 1文ずつ分割（最も安定する粒度）
+  const raw = text.split(/(?<=[。！？\!\?\n])/);
   const chunks = [];
-  let buf = '';
-  for (const s of sentences) {
-    const trimmed = s.trim();
-    if (!trimmed) continue;
-    if ((buf + trimmed).length > maxLen && buf.length > 0) {
-      chunks.push(buf.trim());
-      buf = '';
-    }
-    buf += trimmed;
+  for (const s of raw) {
+    const t = s.trim();
+    if (t.length > 0) chunks.push(t);
   }
-  if (buf.trim()) chunks.push(buf.trim());
   return chunks;
 }
 
@@ -990,27 +986,23 @@ function ttsPlay() {
   if (!body) return;
 
   speechSynthesis.cancel();
-  ttsUtterances = splitForTTS(body);
-
-  // 保存済み位置から再開（範囲外ならリセット）
-  ttsIndex = (savedTtsChunk > 0 && savedTtsChunk < ttsUtterances.length)
+  ttsChunks = splitForTTS(body);
+  ttsIndex = (savedTtsChunk > 0 && savedTtsChunk < ttsChunks.length)
     ? savedTtsChunk : 0;
-
+  ttsRetryCount = 0;
   ttsState = 'playing';
   updateTtsUI();
   document.getElementById('playBtn').textContent = '▶ 読み上げ';
-  startKeepAlive();
-  speakChunk();
+  scheduleNextChunk();
 }
 
-function speakChunk() {
-  // ウォッチドッグをリセット
-  clearWatchdog();
+function scheduleNextChunk() {
+  clearTtsTimer();
 
-  if (ttsIndex >= ttsUtterances.length) {
-    // 全チャンク読み上げ完了
-    stopKeepAlive();
-    speechSynthesis.cancel();
+  if (ttsState !== 'playing') return;
+
+  if (ttsIndex >= ttsChunks.length) {
+    // 完了
     ttsState = 'stopped';
     ttsIndex = 0;
     savedTtsChunk = 0;
@@ -1020,103 +1012,96 @@ function speakChunk() {
     return;
   }
 
-  const text = ttsUtterances[ttsIndex];
+  // 前の発話が残っていたらキャンセル
+  speechSynthesis.cancel();
+
+  // 少し待ってから発話（cancel直後にspeakすると無視されることがある）
+  ttsTimer = setTimeout(() => {
+    if (ttsState !== 'playing') return;
+    speakOneChunk();
+  }, 100);
+}
+
+function speakOneChunk() {
+  const text = ttsChunks[ttsIndex];
   const utter = new SpeechSynthesisUtterance(text);
   utter.lang = 'ja-JP';
   utter.rate = ttsSpeed;
 
-  // 日本語音声を優先選択
   const voices = speechSynthesis.getVoices();
   const jaVoice = voices.find(v => v.lang.startsWith('ja'));
   if (jaVoice) utter.voice = jaVoice;
 
-  let ended = false;
+  let resolved = false;
 
-  const onChunkDone = () => {
-    if (ended) return;
-    ended = true;
-    clearWatchdog();
-    if (ttsState === 'playing') {
+  const advance = () => {
+    if (resolved) return;
+    resolved = true;
+    clearTtsTimer();
+    ttsRetryCount = 0;
+    ttsIndex++;
+    savedTtsChunk = ttsIndex;
+    if (currentArticleId) dbSavePosition(currentArticleId, ttsIndex);
+    scheduleNextChunk();
+  };
+
+  const retry = () => {
+    if (resolved) return;
+    resolved = true;
+    clearTtsTimer();
+    ttsRetryCount++;
+    if (ttsRetryCount >= TTS_MAX_RETRY) {
+      // リトライ上限 → スキップして次へ
+      console.warn('TTS: skipping chunk', ttsIndex, 'after', TTS_MAX_RETRY, 'retries');
+      ttsRetryCount = 0;
       ttsIndex++;
       savedTtsChunk = ttsIndex;
       if (currentArticleId) dbSavePosition(currentArticleId, ttsIndex);
-      // 次のチャンクを少し遅延して開始（安定性向上）
-      setTimeout(() => speakChunk(), 50);
     }
+    scheduleNextChunk();
   };
 
-  utter.onend = onChunkDone;
-
+  utter.onend = () => advance();
   utter.onerror = (e) => {
-    if (e.error === 'canceled') return;
-    console.warn('TTS error:', e.error, '- retrying chunk', ttsIndex);
-    ended = true;
-    clearWatchdog();
-    // エラー時はリトライ
-    if (ttsState === 'playing') {
-      setTimeout(() => speakChunk(), 300);
-    }
+    if (e.error === 'canceled' && ttsState !== 'playing') return;
+    console.warn('TTS error:', e.error, 'chunk:', ttsIndex);
+    retry();
   };
 
   speechSynthesis.speak(utter);
 
-  // ウォッチドッグ: チャンクの推定読み上げ時間 + 余裕を超えたら強制的に次へ
-  // 日本語は約5〜7文字/秒、速度倍率を考慮
-  const estimatedMs = (text.length / (5 * ttsSpeed)) * 1000 + 5000;
-  ttsWatchdog = setTimeout(() => {
-    if (!ended && ttsState === 'playing') {
-      console.warn('TTS watchdog: chunk', ttsIndex, 'timed out, forcing next');
+  // 安全タイマー: 推定時間の2倍経っても終わらなければリトライ
+  const estimatedMs = Math.max((text.length / 4) * 1000 / ttsSpeed, 3000) * 2;
+  ttsTimer = setTimeout(() => {
+    if (!resolved && ttsState === 'playing') {
+      console.warn('TTS timeout: chunk', ttsIndex, '- forcing retry');
       speechSynthesis.cancel();
-      onChunkDone();
+      retry();
     }
-  }, Math.max(estimatedMs, 8000));
+  }, estimatedMs);
 }
 
-function clearWatchdog() {
-  if (ttsWatchdog) { clearTimeout(ttsWatchdog); ttsWatchdog = null; }
-}
-
-// Chrome の長時間読み上げ停止バグ対策
-// 定期的に pause/resume を呼んでセッションを維持
-function startKeepAlive() {
-  stopKeepAlive();
-  ttsKeepAlive = setInterval(() => {
-    if (ttsState === 'playing' && speechSynthesis.speaking && !speechSynthesis.paused) {
-      speechSynthesis.pause();
-      speechSynthesis.resume();
-    }
-  }, 5000);
-}
-
-function stopKeepAlive() {
-  if (ttsKeepAlive) { clearInterval(ttsKeepAlive); ttsKeepAlive = null; }
+function clearTtsTimer() {
+  if (ttsTimer) { clearTimeout(ttsTimer); ttsTimer = null; }
 }
 
 function ttsPause() {
-  speechSynthesis.pause();
+  // pause/resume は使わない。状態だけ変えて、現在のチャンク完了後に止まる
   ttsState = 'paused';
-  clearWatchdog();
-  stopKeepAlive();
+  speechSynthesis.cancel(); // 現在の発話を即停止
+  clearTtsTimer();
   updateTtsUI();
 }
 
 function ttsResume() {
-  speechSynthesis.resume();
   ttsState = 'playing';
-  startKeepAlive();
+  ttsRetryCount = 0;
   updateTtsUI();
-  // resume後に止まることがあるので、ウォッチドッグを設定
-  ttsWatchdog = setTimeout(() => {
-    if (ttsState === 'playing' && !speechSynthesis.speaking) {
-      console.warn('TTS resume failed, restarting chunk', ttsIndex);
-      speakChunk();
-    }
-  }, 3000);
+  scheduleNextChunk(); // 現在のチャンクから再開
 }
 
 function ttsStop() {
-  clearWatchdog();
-  stopKeepAlive();
+  clearTtsTimer();
   speechSynthesis.cancel();
   if (currentArticleId && ttsIndex > 0) {
     savedTtsChunk = ttsIndex;
@@ -1124,6 +1109,7 @@ function ttsStop() {
   }
   ttsState = 'stopped';
   ttsIndex = 0;
+  ttsRetryCount = 0;
   updateTtsUI();
 }
 
@@ -1144,7 +1130,6 @@ function updateSpeed(val) {
   document.getElementById('speedLabel').textContent = ttsSpeed.toFixed(1) + 'x';
 }
 
-// 音声リスト読み込み
 speechSynthesis.onvoiceschanged = () => {};
 
 // Enterキーで保存
