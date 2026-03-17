@@ -170,6 +170,17 @@ body {
   color: var(--text2); padding: 6px; border-radius: 8px; flex-shrink: 0;
 }
 
+/* 全記事読み上げボタン */
+.play-all-btn {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: var(--primary); color: #fff; border: none;
+  padding: 14px 32px; border-radius: 28px; font-size: 16px; font-weight: 700;
+  cursor: pointer; z-index: 150;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+  transition: opacity 0.2s, transform 0.2s;
+}
+.play-all-btn:active { transform: translateX(-50%) scale(0.95); }
+
 </style>
 </head>
 <body>
@@ -193,6 +204,10 @@ body {
     <small>本文を抽出してオフラインで読み上げできます</small><br><br>
     <small style="color:var(--primary)">💡 Chromeメニュー →「ホーム画面に追加」で<br>共有メニューから直接保存できます</small>
   </div>
+  <!-- 全記事読み上げボタン -->
+  <button id="playAllBtn" class="play-all-btn" onclick="playAllArticles()" style="display:none">
+    ▶ まとめて読み上げ
+  </button>
 </div>
 
 <!-- 詳細画面 -->
@@ -745,6 +760,10 @@ async function renderList() {
   // 未読記事IDリストを更新（自動遷移用）
   activeArticleIds = allArticles.filter(a => !a.archived).map(a => a.id);
 
+  // 読み上げボタンの表示制御
+  const playAllBtn = document.getElementById('playAllBtn');
+  playAllBtn.style.display = (currentTab === 'active' && activeArticleIds.length > 0) ? '' : 'none';
+
   const list = document.getElementById('articleList');
   const empty = document.getElementById('emptyState');
 
@@ -912,6 +931,17 @@ async function onTtsFinished() {
     showToast('全記事の読み上げ完了');
     showList();
   }
+}
+
+// 一覧画面から全未読記事を順番に読み上げ開始
+async function playAllArticles() {
+  if (activeArticleIds.length === 0) {
+    showToast('未読の記事がありません');
+    return;
+  }
+  const firstId = activeArticleIds[0];
+  await showDetail(firstId);
+  setTimeout(() => ttsPlay(), 500);
 }
 
 function showLoading(on) {
