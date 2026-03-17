@@ -9,6 +9,7 @@
 <link rel="manifest" href="./manifest.json">
 <meta name="theme-color" content="#1a73e8">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📖</text></svg>">
+<link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📖</text></svg>">
 <style>
 :root {
   --bg: #f5f5f5; --surface: #ffffff; --primary: #1a73e8;
@@ -225,6 +226,23 @@ body {
 <div class="loading-overlay" id="loading"><div class="spinner"></div></div>
 <div class="toast" id="toast"></div>
 
+<!-- PWAインストールバナー -->
+<div id="installBanner" style="display:none; position:fixed; bottom:0; left:0; right:0; z-index:500;
+  background:var(--primary); color:#fff; padding:14px 16px; text-align:center;
+  padding-bottom:calc(14px + env(safe-area-inset-bottom));">
+  <div style="font-size:14px; font-weight:600; margin-bottom:8px;">
+    📲 アプリをインストールすると共有メニューから直接保存できます
+  </div>
+  <button id="installBtn" onclick="installPWA()" style="background:#fff; color:var(--primary);
+    border:none; padding:8px 24px; border-radius:8px; font-size:14px; font-weight:600; cursor:pointer;">
+    インストール
+  </button>
+  <button onclick="dismissInstall()" style="background:none; border:none; color:rgba(255,255,255,0.8);
+    font-size:13px; cursor:pointer; margin-left:12px;">
+    後で
+  </button>
+</div>
+
 <script>
 // ============================================================
 // IndexedDB (オフライン保存)
@@ -312,6 +330,7 @@ async function dbArchive(id) {
   const article = await dbGet(id);
   if (article) {
     article.archived = true;
+    article.ttsChunk = 0; // アーカイブ時に位置リセット
     await dbUpdate(article);
   }
 }
@@ -320,6 +339,14 @@ async function dbUnarchive(id) {
   const article = await dbGet(id);
   if (article) {
     article.archived = false;
+    await dbUpdate(article);
+  }
+}
+
+async function dbSavePosition(id, chunkIndex) {
+  const article = await dbGet(id);
+  if (article) {
+    article.ttsChunk = chunkIndex;
     await dbUpdate(article);
   }
 }
@@ -333,15 +360,72 @@ const CORS_PROXIES = [
   url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
 ];
 
+// Jina Reader API: JSレンダリング対応でMarkdownテキストを返す（無料）
+const JINA_READER = url => `https://r.jina.ai/${url}`;
+
 async function fetchHTML(url) {
   let lastError;
   for (const proxy of CORS_PROXIES) {
     try {
       const resp = await fetch(proxy(url), { signal: AbortSignal.timeout(20000) });
-      if (resp.ok) return await resp.text();
+      if (resp.ok) {
+        const text = await resp.text();
+        if (text.length > 500) return text;
+      }
     } catch (e) { lastError = e; }
   }
   throw new Error('記事を取得できませんでした: ' + (lastError?.message || ''));
+}
+
+// Jina Reader経由でテキスト取得（JSレンダリング対応、Markdown形式で返る）
+async function fetchViaJina(url) {
+  try {
+    const resp = await fetch(JINA_READER(url), {
+      signal: AbortSignal.timeout(30000),
+      headers: { 'Accept': 'text/plain' }
+    });
+    if (resp.ok) {
+      const text = await resp.text();
+      if (text.length > 200) return text;
+    }
+  } catch (e) { /* fall through */ }
+  return null;
+}
+
+// 「続きを見る」「もっと読む」等のリンクURLをHTMLから検出
+function detectContinueLinks(html, baseUrl) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  const links = [];
+  const patterns = [
+    /続きを[見読]る/,
+    /もっと[見読]む/,
+    /全文を[見読]む/,
+    /記事全文/,
+    /Read\s*More/i,
+    /Continue\s*Reading/i,
+    /全文表示/,
+    /つづきを読む/,
+    /次のページ/,
+    /次へ/,
+  ];
+
+  doc.querySelectorAll('a[href]').forEach(a => {
+    const text = a.textContent.trim();
+    const href = a.getAttribute('href');
+    if (!href) return;
+    for (const pat of patterns) {
+      if (pat.test(text)) {
+        try {
+          const fullUrl = new URL(href, baseUrl).toString();
+          if (!links.includes(fullUrl)) links.push(fullUrl);
+        } catch {}
+        break;
+      }
+    }
+  });
+
+  return links;
 }
 
 // ============================================================
@@ -447,29 +531,72 @@ function buildPageUrl(baseUrl, pageNum) {
 // 全ページのHTMLを取得して本文を結合
 async function fetchAllPages(url) {
   // 1ページ目を取得
-  const firstHtml = await fetchHTML(url);
+  let firstHtml;
+  let usedJina = false;
+  try {
+    firstHtml = await fetchHTML(url);
+  } catch {
+    firstHtml = null;
+  }
+
+  // CORSプロキシで本文が十分に取れたかチェック
+  const firstBodyLen = firstHtml ? extractBodyText(firstHtml).length : 0;
+
+  // 本文が短い場合（JS依存サイトの可能性）→ Jina Reader にフォールバック
+  if (firstBodyLen < 200) {
+    const jinaText = await fetchViaJina(url);
+    if (jinaText && jinaText.length > firstBodyLen) {
+      // Jina Readerはレンダリング済みテキストを返すので、
+      // 「続きを見る」も展開済みの可能性が高い
+      return { htmls: [], jinaText, pageCount: 1 };
+    }
+  }
+
+  if (!firstHtml) {
+    throw new Error('記事を取得できませんでした');
+  }
+
+  // 「続きを見る」リンクを検出
+  const continueLinks = detectContinueLinks(firstHtml, url);
+
   const maxPage = detectMaxPage(firstHtml, url);
 
+  // 「続きを見る」リンクがある場合はそれを優先取得
+  if (continueLinks.length > 0 && maxPage <= 1) {
+    const htmls = [firstHtml];
+    for (const link of continueLinks) {
+      try {
+        const html = await fetchHTML(link);
+        if (html && html.length > 500 && !isSameContent(firstHtml, html)) {
+          htmls.push(html);
+        }
+      } catch {
+        // 「続きを見る」先がCORSで取れない場合、Jina Readerで全文取得を試みる
+        const jinaText = await fetchViaJina(url);
+        if (jinaText && jinaText.length > firstBodyLen) {
+          return { htmls: [], jinaText, pageCount: 1 };
+        }
+      }
+    }
+    return { htmls, pageCount: htmls.length };
+  }
+
   if (maxPage <= 1 && maxPage !== -1) {
-    // 単一ページ記事
     return { htmls: [firstHtml], pageCount: 1 };
   }
 
   const htmls = [firstHtml];
 
   if (maxPage === -1) {
-    // 逐次取得モード: 404やリダイレクトまで取得
     for (let p = 2; p <= 20; p++) {
       try {
         const pageUrl = buildPageUrl(url, p);
         const html = await fetchHTML(pageUrl);
-        // 1ページ目と同じ内容ならページ分割終了
         if (html.length < 500 || isSameContent(firstHtml, html)) break;
         htmls.push(html);
       } catch { break; }
     }
   } else {
-    // 既知のページ数分を並列取得
     const fetches = [];
     for (let p = 2; p <= Math.min(maxPage, 20); p++) {
       fetches.push(
@@ -618,11 +745,13 @@ async function renderList() {
   }
   empty.style.display = 'none';
 
-  list.innerHTML = articles.map(a => `
+  list.innerHTML = articles.map(a => {
+    const hasProgress = !a.archived && a.ttsChunk > 0;
+    return `
     <div class="article-item${a.archived ? ' archived' : ''}" onclick="showDetail(${a.id})">
       <div class="article-info">
-        <div class="article-title">${escapeHtml(a.title)}</div>
-        <div class="article-meta">${new Date(a.savedAt).toLocaleString('ja-JP')} · ${Math.ceil(a.content.length / 500)}分</div>
+        <div class="article-title">${hasProgress ? '▶ ' : ''}${escapeHtml(a.title)}</div>
+        <div class="article-meta">${new Date(a.savedAt).toLocaleString('ja-JP')} · ${Math.ceil(a.content.length / 500)}分${hasProgress ? ' · 途中' : ''}</div>
       </div>
       ${a.archived
         ? `<button class="archive-btn" onclick="event.stopPropagation(); unarchiveArticle(${a.id})" title="未読に戻す">↩️</button>`
@@ -630,7 +759,7 @@ async function renderList() {
       }
       <button class="delete-btn" onclick="event.stopPropagation(); deleteArticle(${a.id})" title="削除">🗑</button>
     </div>
-  `).join('');
+  `}).join('');
 }
 
 function escapeHtml(str) {
@@ -651,18 +780,39 @@ async function saveArticle() {
 
   showLoading(true);
   try {
-    const { htmls, pageCount } = await fetchAllPages(url);
-    const { title, content } = extractArticle(htmls, url);
+    const { htmls, jinaText, pageCount } = await fetchAllPages(url);
+
+    let title, content;
+    if (jinaText) {
+      // Jina Reader経由のMarkdownテキスト
+      const lines = jinaText.split('\n').filter(l => l.trim());
+      // 最初の行をタイトルとして使用（Markdown見出しの # を除去）
+      title = (lines[0] || '無題').replace(/^#+\s*/, '').trim();
+      content = lines.slice(1).join('\n').trim();
+      // Markdownの装飾を除去
+      content = content
+        .replace(/!\[.*?\]\(.*?\)/g, '')  // 画像
+        .replace(/\[([^\]]*)\]\(.*?\)/g, '$1')  // リンク
+        .replace(/[*_]{1,3}([^*_]+)[*_]{1,3}/g, '$1')  // 太字・斜体
+        .replace(/^#+\s*/gm, '')  // 見出し
+        .replace(/^[-*]\s+/gm, '')  // リスト
+        .replace(/\n{3,}/g, '\n\n')  // 連続改行
+        .trim();
+    } else {
+      ({ title, content } = extractArticle(htmls, url));
+    }
+
     if (content.length < 50) {
       showToast('本文を十分に抽出できませんでした');
       showLoading(false);
       return;
     }
-    await dbAdd({ url, title, content, savedAt: Date.now(), archived: false });
+    await dbAdd({ url, title, content, savedAt: Date.now(), archived: false, ttsChunk: 0 });
     input.value = '';
     await renderList();
     const pageMsg = pageCount > 1 ? ` (${pageCount}ページ結合)` : '';
-    showToast(`保存しました${pageMsg}`);
+    const jinaMsg = jinaText ? ' (JS対応)' : '';
+    showToast(`保存しました${pageMsg}${jinaMsg}`);
   } catch (e) {
     showToast(e.message);
   }
@@ -688,15 +838,22 @@ async function deleteArticle(id) {
   showToast('削除しました');
 }
 
+let savedTtsChunk = 0; // DB から読み込んだ再開位置
+
 async function showDetail(id) {
   const article = await dbGet(id);
   if (!article) return;
   currentArticleId = id;
+  savedTtsChunk = article.ttsChunk || 0;
 
   document.getElementById('detailHeaderTitle').textContent = article.title;
   document.getElementById('detailTitle').textContent = article.title;
   document.getElementById('detailUrl').textContent = article.url;
   document.getElementById('detailBody').textContent = article.content;
+
+  // 再開位置があればボタンラベルを変更
+  const playBtn = document.getElementById('playBtn');
+  playBtn.textContent = savedTtsChunk > 0 ? '▶ 続きから再生' : '▶ 読み上げ';
 
   document.getElementById('listView').style.display = 'none';
   document.getElementById('detailView').style.display = 'block';
@@ -785,18 +942,26 @@ function ttsPlay() {
 
   speechSynthesis.cancel();
   ttsUtterances = splitForTTS(body);
-  ttsIndex = 0;
+
+  // 保存済み位置から再開（範囲外ならリセット）
+  ttsIndex = (savedTtsChunk > 0 && savedTtsChunk < ttsUtterances.length)
+    ? savedTtsChunk : 0;
+
   ttsState = 'playing';
   updateTtsUI();
+  // 再生開始したらボタンラベルをリセット
+  document.getElementById('playBtn').textContent = '▶ 読み上げ';
   speakChunk();
 }
 
 function speakChunk() {
   if (ttsIndex >= ttsUtterances.length) {
-    // 全チャンク読み上げ完了 → アーカイブ＆次の記事へ
+    // 全チャンク読み上げ完了 → 位置リセット＆アーカイブ＆次の記事へ
     speechSynthesis.cancel();
     ttsState = 'stopped';
     ttsIndex = 0;
+    savedTtsChunk = 0;
+    if (currentArticleId) dbSavePosition(currentArticleId, 0);
     updateTtsUI();
     onTtsFinished();
     return;
@@ -813,6 +978,9 @@ function speakChunk() {
   utter.onend = () => {
     if (ttsState === 'playing') {
       ttsIndex++;
+      // 読み上げ位置をDBに保存（チャンクごと）
+      savedTtsChunk = ttsIndex;
+      if (currentArticleId) dbSavePosition(currentArticleId, ttsIndex);
       speakChunk();
     }
   };
@@ -839,6 +1007,11 @@ function ttsResume() {
 
 function ttsStop() {
   speechSynthesis.cancel();
+  // 停止時に現在位置を保存
+  if (currentArticleId && ttsIndex > 0) {
+    savedTtsChunk = ttsIndex;
+    dbSavePosition(currentArticleId, ttsIndex);
+  }
   ttsState = 'stopped';
   ttsIndex = 0;
   updateTtsUI();
@@ -884,14 +1057,63 @@ window.addEventListener('popstate', () => {
   }
 });
 
+// 離脱時に読み上げ位置を保存
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && currentArticleId && ttsIndex > 0) {
+    dbSavePosition(currentArticleId, ttsIndex);
+  }
+});
+window.addEventListener('beforeunload', () => {
+  if (currentArticleId && ttsIndex > 0) {
+    dbSavePosition(currentArticleId, ttsIndex);
+  }
+});
+
 // 初期表示
 renderList();
 
 // ============================================================
-// PWA: Service Worker 登録
+// PWA: Service Worker 登録 & インストールプロンプト
 // ============================================================
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});
+}
+
+let deferredInstallPrompt = null;
+
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  // インストール済みでなければバナー表示
+  if (!localStorage.getItem('pwa_install_dismissed')) {
+    document.getElementById('installBanner').style.display = 'block';
+  }
+});
+
+window.addEventListener('appinstalled', () => {
+  document.getElementById('installBanner').style.display = 'none';
+  deferredInstallPrompt = null;
+  showToast('インストール完了！共有メニューに表示されます');
+});
+
+function installPWA() {
+  if (deferredInstallPrompt) {
+    deferredInstallPrompt.prompt();
+    deferredInstallPrompt.userChoice.then(result => {
+      if (result.outcome === 'accepted') {
+        document.getElementById('installBanner').style.display = 'none';
+      }
+      deferredInstallPrompt = null;
+    });
+  } else {
+    // プロンプトが使えない場合は手動手順を案内
+    showToast('Chromeメニュー → 「ホーム画面に追加」をタップしてください');
+  }
+}
+
+function dismissInstall() {
+  document.getElementById('installBanner').style.display = 'none';
+  localStorage.setItem('pwa_install_dismissed', Date.now());
 }
 
 // ============================================================

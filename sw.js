@@ -1,5 +1,5 @@
-const CACHE_NAME = 'article-reader-v1';
-const ASSETS = ['./index.html', './manifest.json'];
+const CACHE_NAME = 'article-reader-v5';
+const ASSETS = ['./', './index.html', './manifest.json'];
 
 self.addEventListener('install', e => {
   e.waitUntil(
@@ -20,10 +20,16 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
 
-  // CORSプロキシへのリクエストはキャッシュしない（常にネットワーク）
-  if (url.hostname !== location.hostname) {
+  // 共有インテント受信
+  if (url.pathname.endsWith('/index.html') && (url.searchParams.has('text') || url.searchParams.has('url'))) {
+    e.respondWith(
+      caches.match('./index.html').then(cached => cached || fetch(e.request))
+    );
     return;
   }
+
+  // 外部リクエストはスルー
+  if (url.hostname !== location.hostname) return;
 
   e.respondWith(
     caches.match(e.request).then(cached => cached || fetch(e.request))
